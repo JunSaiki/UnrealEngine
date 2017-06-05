@@ -6,4 +6,5 @@
 ; - TargetNames contains at the project location
 ;
 ./
+Samples/
 Engine/Source/
