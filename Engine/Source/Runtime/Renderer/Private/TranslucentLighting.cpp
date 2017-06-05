@@ -614,7 +614,7 @@ public:
 
 	static bool ShouldCache(EShaderPlatform Platform) 
 	{ 
-		return IsFeatureLevelSupported(Platform, ERHIFeatureLevel::SM4); 
+		return IsFeatureLevelSupported(Platform, ERHIFeatureLevel::SM4) && (RHISupportsGeometryShaders(Platform) || RHISupportsVertexShaderLayer(Platform));
 	}
 
 	FFilterTranslucentVolumePS(const ShaderMetaType::CompiledShaderInitializerType& Initializer):
@@ -742,7 +742,7 @@ public:
 
 	static bool ShouldCache(EShaderPlatform Platform)
 	{
-		return IsFeatureLevelSupported(Platform, ERHIFeatureLevel::SM4);
+		return IsFeatureLevelSupported(Platform, ERHIFeatureLevel::SM4) && (RHISupportsGeometryShaders(Platform) || RHISupportsVertexShaderLayer(Platform));
 	}
 
 	FTranslucentObjectShadowingPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer):
@@ -799,7 +799,7 @@ public:
 	  */
 	static bool ShouldCache(EShaderPlatform Platform, const FMaterial* Material)
 	{
-		return (Material->IsLightFunction() || Material->IsSpecialEngineMaterial()) && IsFeatureLevelSupported(Platform, ERHIFeatureLevel::SM4);
+		return (Material->IsLightFunction() || Material->IsSpecialEngineMaterial()) && (IsFeatureLevelSupported(Platform, ERHIFeatureLevel::SM4) && (RHISupportsGeometryShaders(Platform) || RHISupportsVertexShaderLayer(Platform)));
 	}
 
 	TTranslucentLightingInjectPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer):
@@ -1624,7 +1624,7 @@ public:
 
 	static bool ShouldCache(EShaderPlatform Platform) 
 	{ 
-		return IsFeatureLevelSupported(Platform, ERHIFeatureLevel::SM4); 
+		return IsFeatureLevelSupported(Platform, ERHIFeatureLevel::SM4) && (RHISupportsGeometryShaders(Platform) || RHISupportsVertexShaderLayer(Platform));
 	}
 
 	FSimpleLightTranslucentLightingInjectPS(const ShaderMetaType::CompiledShaderInitializerType& Initializer):

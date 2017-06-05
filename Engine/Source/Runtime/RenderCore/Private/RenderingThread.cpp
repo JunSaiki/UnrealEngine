@@ -155,13 +155,6 @@ FSuspendRenderingThread::FSuspendRenderingThread( bool bInRecreateThread )
 /** Destructor that starts the renderthread again */
 FSuspendRenderingThread::~FSuspendRenderingThread()
 {
-#if PLATFORM_MAC	// On OS X Apple's context sharing is a strict interpretation of the spec. so a resource is only properly visible to other contexts
-					// in the share group after a flush. Thus we call RHIFlushResources which will flush the current context's commands to GL (but not wait for them).
-	ENQUEUE_UNIQUE_RENDER_COMMAND(FlushCommand,
-		RHIFlushResources();
-	);
-#endif
-	
 	if ( bRecreateThread )
 	{
 		GUseThreadedRendering = bUseRenderingThread;
@@ -982,10 +975,12 @@ static void GameThreadWaitForTask(const FGraphEventRef& Task, bool bEmptyGameThr
 
 					// Fatal timeout if we run out of time and this thread is being monitor for heartbeats
 					// (We could just let the heartbeat monitor error for us, but this leads to better diagnostics).
+#if !PLATFORM_IOS // @todo Rhino: Timeout isn't long enough for Rhino...
 					if (FPlatformTime::Seconds() >= EndTime && FThreadHeartBeat::Get().IsBeating() && !bDisabled)
 					{
 						UE_LOG(LogRendererCore, Fatal, TEXT("GameThread timed out waiting for RenderThread after %.02f secs"), FPlatformTime::Seconds() - StartTime);
 					}
+#endif
 				}
 			}
 			while (!bDone);

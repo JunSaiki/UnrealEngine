@@ -6,6 +6,7 @@
 #include "IOSAppDelegate.h"
 #include "IOS/IOSPlatformFramePacer.h"
 #endif
+#include "ConfigCacheIni.h"
 
 #include "MetalContext.h"
 #include "MetalProfiler.h"
@@ -81,6 +82,14 @@ static FAutoConsoleVariableRef CVarMetalRuntimeDebugLevel(
 	TEXT("\t6: Record the draw, blit & dispatch commands issued into a command-buffer and report them on failure,\n")
 	TEXT("\t7: Allow rhi.Metal.CommandBufferCommitThreshold to break command-encoders (except when MSAA is enabled),\n")
 	TEXT("\t8: Wait for each command-buffer to complete immediately after submission."));
+
+float GMetalPresentFramePacing = 0.0f;
+#if !PLATFORM_MAC
+static FAutoConsoleVariableRef CVarMetalPresentFramePacing(
+	TEXT("rhi.Metal.PresentFramePacing"),
+	GMetalPresentFramePacing,
+	TEXT("Specify the desired frame rate for presentation (iOS 10.3+ only, default: 0.0f, off"));
+#endif
 
 #if SHOULD_TRACK_OBJECTS
 TMap<id, int32> ClassCounts;
@@ -229,7 +238,7 @@ static id<MTLDevice> GetMTLDevice(uint32& DeviceIndex)
 	return SelectedDevice;
 }
 
-static MTLPrimitiveTopologyClass TranslatePrimitiveTopology(uint32 PrimitiveType)
+MTLPrimitiveTopologyClass TranslatePrimitiveTopology(uint32 PrimitiveType)
 {
 	switch (PrimitiveType)
 	{
@@ -329,6 +338,21 @@ FMetalDeviceContext::FMetalDeviceContext(id<MTLDevice> MetalDevice, uint32 InDev
 	{
 		FrameReadyEvent = FPlatformProcess::GetSynchEventFromPool();
 		FIOSPlatformRHIFramePacer::InitWithEvent( FrameReadyEvent );
+		
+		// A bit dirty - this allows the present frame pacing to match the CPU pacing by default unless you've overridden it with the CVar
+		// In all likelihood the CVar is only useful for debugging.
+		if (GMetalPresentFramePacing <= 0.0f)
+		{
+			FString FrameRateLockAsEnum;
+			GConfig->GetString(TEXT("/Script/IOSRuntimeSettings.IOSRuntimeSettings"), TEXT("FrameRateLock"), FrameRateLockAsEnum, GEngineIni);
+	
+			uint32 FrameRateLock = 0;
+			FParse::Value(*FrameRateLockAsEnum, TEXT("PUFRL_"), FrameRateLock);
+			if (FrameRateLock > 0)
+			{
+				GMetalPresentFramePacing = (float)FrameRateLock;
+			}
+		}
 	}
 #endif
 	
@@ -412,6 +436,10 @@ void FMetalDeviceContext::ClearFreeList()
 				
 				[Entry release];
 			}
+			for (id<MTLHeap> Entry : HeapFreeList)
+			{
+				Heap.ReleaseHeap(Entry);
+			}
 			delete Pair;
 			DelayedFreeLists.RemoveAt(Index, 1, false);
 		}
@@ -424,20 +452,52 @@ void FMetalDeviceContext::ClearFreeList()
 
 void FMetalDeviceContext::DrainHeap()
 {
-	Heap.Defrag(*this, true);
-	StateCache.Reset();
+	Heap.Compact(*this, true);
 }
 
 void FMetalDeviceContext::EndFrame()
 {
-	ClearFreeList();
-	
 	if(FrameCounter != GFrameNumberRenderThread)
 	{
 		FrameCounter = GFrameNumberRenderThread;
 		
-		Heap.Defrag(*this, false);
+		Heap.Compact(*this, false);
+		
+		CommandQueue.InsertDebugCaptureBoundary();
 	}
+	
+	FlushFreeList();
+	
+	ClearFreeList();
+	
+	// Latched update of whether to use runtime debugging features
+	uint32 SubmitFlags = EMetalSubmitFlagsNone;
+#if METAL_DEBUG_OPTIONS
+	if (GMetalRuntimeDebugLevel != CommandQueue.GetRuntimeDebuggingLevel())
+	{
+		CommandQueue.SetRuntimeDebuggingLevel(GMetalRuntimeDebugLevel);
+		
+		// After change the debug features level wait on commit
+		SubmitFlags |= EMetalSubmitFlagsWaitOnCommandBuffer;
+	}
+#endif
+	RenderPass.Submit((EMetalSubmitFlags)SubmitFlags);
+	
+#if SHOULD_TRACK_OBJECTS
+	// print out outstanding objects
+	if ((GFrameCounter % 500) == 10)
+	{
+		for (auto It = ClassCounts.CreateIterator(); It; ++It)
+		{
+			UE_LOG(LogMetal, Display, TEXT("%s has %d outstanding allocations"), *FString([It.Key() description]), It.Value());
+		}
+	}
+#endif
+	
+	InitFrame(true);
+	
+	extern void InitFrame_UniformBufferPoolCleanup();
+	InitFrame_UniformBufferPoolCleanup();
 }
 
 void FMetalDeviceContext::BeginScene()
@@ -475,6 +535,7 @@ void FMetalDeviceContext::FlushFreeList()
 	FreeListMutex.Lock();
 	NewList->ObjectFreeList = ObjectFreeList;
 	NewList->ResourceFreeList = ResourceFreeList;
+	NewList->HeapFreeList = HeapFreeList;
 #if METAL_DEBUG_OPTIONS
 	if (FrameFences)
 	{
@@ -569,6 +630,7 @@ void FMetalDeviceContext::FlushFreeList()
 #endif
 	ObjectFreeList.Empty(ObjectFreeList.Num());
 	ResourceFreeList.Empty(ResourceFreeList.Num());
+	HeapFreeList.Empty(HeapFreeList.Num());
 	FreeListMutex.Unlock();
 	
 	dispatch_semaphore_t Signal = NewList->Signal;
@@ -585,12 +647,20 @@ void FMetalDeviceContext::FlushFreeList()
 
 void FMetalDeviceContext::EndDrawingViewport(FMetalViewport* Viewport, bool bPresent)
 {
-	FlushFreeList();
-	
 	// enqueue a present if desired
 	static bool const bOffscreenOnly = FParse::Param(FCommandLine::Get(), TEXT("MetalOffscreenOnly"));
 	if (bPresent && !bOffscreenOnly)
 	{
+		RenderPass.End();
+		
+		RenderPass.Submit(EMetalSubmitFlagsCreateCommandBuffer);
+	
+		// We may be limiting our framerate to the display link
+        if( FrameReadyEvent != nullptr )
+        {
+            FrameReadyEvent->Wait();
+        }
+        
 		id<CAMetalDrawable> Drawable = (id<CAMetalDrawable>)Viewport->GetDrawable(EMetalViewportAccessRHI);
 		if (Drawable && Drawable.texture)
 		{
@@ -618,52 +688,46 @@ void FMetalDeviceContext::EndDrawingViewport(FMetalViewport* Viewport, bool bPre
 			
 			id<MTLCommandBuffer> CurrentCommandBuffer = GetCurrentCommandBuffer();
 			check(CurrentCommandBuffer);
-			
+
+
 			[CurrentCommandBuffer addScheduledHandler:^(id<MTLCommandBuffer>) {
-				[Drawable present];
+#if !PLATFORM_MAC
+                static float MetalPresentFramePacing = GMetalPresentFramePacing;
+                if (FMath::IsNearlyEqual( GMetalPresentFramePacing, 24.0f, (float)KINDA_SMALL_NUMBER ))
+                {
+                    if (FMath::IsNearlyEqual( MetalPresentFramePacing, 30.0f, (float)KINDA_SMALL_NUMBER ))
+	                {
+                        MetalPresentFramePacing = 20.0f;
+	                }
+	                else
+	                {
+	                    MetalPresentFramePacing = 30.0f;
+	                }
+                }
+                else
+                {
+                    MetalPresentFramePacing = GMetalPresentFramePacing;
+                }
+
+				const float TargetFrameTime = GMetalPresentFramePacing > 0.0f ? (1.0f / MetalPresentFramePacing) : 0.0f;
+				if (TargetFrameTime > 0.0f && FMetalCommandQueue::SupportsFeature(EMetalFeaturesPresentMinDuration))
+				{
+					[Drawable presentAfterMinimumDuration:TargetFrameTime];
+				}
+				else
+#endif
+				{
+					[Drawable present];
+				}
 			}];
 		}
 	}
 	
-	// We may be limiting our framerate to the display link
-	if( FrameReadyEvent != nullptr )
+	// The editor doesn't always call EndFrame appropriately so do so here
+	if (GIsEditor)
 	{
-		FrameReadyEvent->Wait();
+		EndFrame();
 	}
-	
-	// Latched update of whether to use runtime debugging features
-	uint32 SubmitFlags = EMetalSubmitFlagsNone;
-#if METAL_DEBUG_OPTIONS
-	if (GMetalRuntimeDebugLevel != CommandQueue.GetRuntimeDebuggingLevel())
-	{
-		CommandQueue.SetRuntimeDebuggingLevel(GMetalRuntimeDebugLevel);
-		
-		// After change the debug features level wait on commit
-		SubmitFlags |= EMetalSubmitFlagsWaitOnCommandBuffer;
-	}
-#endif
-	RenderPass.Submit((EMetalSubmitFlags)SubmitFlags);
-	
-	if (bPresent)
-	{
-		CommandQueue.InsertDebugCaptureBoundary();
-	}
-	
-#if SHOULD_TRACK_OBJECTS
-	// print out outstanding objects
-	if ((GFrameCounter % 500) == 10)
-	{
-		for (auto It = ClassCounts.CreateIterator(); It; ++It)
-		{
-			UE_LOG(LogMetal, Display, TEXT("%s has %d outstanding allocations"), *FString([It.Key() description]), It.Value());
-		}
-	}
-#endif
-	
-	InitFrame(true);
-	
-	extern void InitFrame_UniformBufferPoolCleanup();
-	InitFrame_UniformBufferPoolCleanup();
 	
 	Viewport->ReleaseDrawable();
 }
@@ -724,6 +788,18 @@ void FMetalDeviceContext::ReleaseFence(id<MTLFence> Fence)
 #endif
 	
 	ReleaseObject(Fence);
+}
+
+void FMetalDeviceContext::ReleaseHeap(id<MTLHeap> theHeap)
+{
+	if (GIsRHIInitialized)
+	{
+		Heap.ReleaseHeap(theHeap);
+	}
+	else
+	{
+		[theHeap release];
+	}
 }
 
 id<MTLTexture> FMetalDeviceContext::CreateTexture(FMetalSurface* Surface, MTLTextureDescriptor* Descriptor)
@@ -989,7 +1065,7 @@ void FMetalContext::InitFrame(bool const bImmediateContext)
 	}
 	
 	// Reallocate if necessary to ensure >= 80% usage, otherwise we're just too wasteful
-	RenderPass.GetRingBuffer()->Shrink();
+	RenderPass.GetRingBuffer().Shrink();
 	
 	// Begin the render pass frame.
 	RenderPass.Begin(StartFence);
@@ -1033,7 +1109,7 @@ void FMetalContext::SubmitCommandBufferAndWait()
 	// kick the whole buffer
 	// Commit to hand the commandbuffer off to the gpu
 	// Wait for completion as requested.
-	SubmitCommandsHint((EMetalSubmitFlagsCreateCommandBuffer | EMetalSubmitFlagsWaitOnCommandBuffer));
+	SubmitCommandsHint((EMetalSubmitFlagsCreateCommandBuffer | EMetalSubmitFlagsBreakCommandBuffer | EMetalSubmitFlagsWaitOnCommandBuffer));
 }
 
 void FMetalContext::ResetRenderCommandEncoder()
@@ -1048,8 +1124,8 @@ void FMetalContext::ResetRenderCommandEncoder()
 bool FMetalContext::PrepareToDraw(uint32 PrimitiveType, EMetalIndexType IndexType)
 {
 	SCOPE_CYCLE_COUNTER(STAT_MetalPrepareDrawTime);
-	TRefCountPtr<FMetalBoundShaderState> CurrentBoundShaderState = StateCache.GetBoundShaderState();
-	check(IsValidRef(CurrentBoundShaderState));
+	TRefCountPtr<FMetalGraphicsPipelineState> CurrentPSO = StateCache.GetGraphicsPSO();
+	check(IsValidRef(CurrentPSO));
 	
 	// Enforce calls to SetRenderTarget prior to issuing draw calls.
 #if PLATFORM_MAC
@@ -1064,61 +1140,15 @@ bool FMetalContext::PrepareToDraw(uint32 PrimitiveType, EMetalIndexType IndexTyp
 	}
 #endif
 	
-	bool bUpdatedStrides = false;
-	uint32 StrideHash = CurrentBoundShaderState->VertexDeclaration->BaseHash;
-	
-	MTLVertexDescriptor* Layout = CurrentBoundShaderState->VertexDeclaration->Layout.VertexDesc;
-	if(Layout && Layout.layouts)
-	{
-		SCOPE_CYCLE_COUNTER(STAT_MetalPrepareVertexDescTime);
-		
-		for (uint32 ElementIndex = 0; ElementIndex < CurrentBoundShaderState->VertexDeclaration->Elements.Num(); ElementIndex++)
-		{
-			const FVertexElement& Element = CurrentBoundShaderState->VertexDeclaration->Elements[ElementIndex];
-			
-			uint32 StreamStride = StateCache.GetVertexStride(Element.StreamIndex);
-			StrideHash = FCrc::MemCrc32(&StreamStride, sizeof(StreamStride), StrideHash);
-			
-			bool const bStrideMistmatch = (StreamStride > 0 && Element.Stride != StreamStride);
-			
-			uint32 const ActualStride = bStrideMistmatch ? StreamStride : (Element.Stride ? Element.Stride : TranslateElementTypeToSize(Element.Type));
-			
-			bool const bStepRateMistmatch = StreamStride == 0 && Element.Stride != StreamStride;
-
-			if (bStrideMistmatch || bStepRateMistmatch)
-			{
-				if (!bUpdatedStrides)
-				{
-					bUpdatedStrides = true;
-					Layout = [Layout copy];
-					TRACK_OBJECT(STAT_MetalVertexDescriptorCount, Layout);
-				}
-				auto BufferLayout = [Layout.layouts objectAtIndexedSubscript:UNREAL_TO_METAL_BUFFER_INDEX(Element.StreamIndex)];
-				check(BufferLayout);
-				if (bStrideMistmatch)
-				{
-					BufferLayout.stride = ActualStride;
-				}
-				if (bStepRateMistmatch)
-				{
-					BufferLayout.stepFunction = MTLVertexStepFunctionConstant;
-					BufferLayout.stepRate = 0;
-				}
-			}
-		}
-	}
-	
-	FMetalHashedVertexDescriptor VertexDesc;
-	{
-		SCOPE_CYCLE_COUNTER(STAT_MetalPrepareVertexDescTime);
-		VertexDesc = !bUpdatedStrides ? CurrentBoundShaderState->VertexDeclaration->Layout : FMetalHashedVertexDescriptor(Layout, StrideHash);
-	}
+	FMetalHashedVertexDescriptor const& VertexDesc = CurrentPSO->VertexDeclaration->Layout;
 	
 	// Validate the vertex layout in debug mode, or when the validation layer is enabled for development builds.
 	// Other builds will just crash & burn if it is incorrect.
 #if UE_BUILD_DEBUG || UE_BUILD_DEVELOPMENT
 	if(CommandQueue.GetRuntimeDebuggingLevel() >= EMetalDebugLevelValidation)
 	{
+		MTLVertexDescriptor* Layout = VertexDesc.VertexDesc;
+		
 		if(Layout && Layout.layouts)
 		{
 			for (uint32 i = 0; i < MaxVertexElementCount; i++)
@@ -1133,12 +1163,10 @@ bool FMetalContext::PrepareToDraw(uint32 PrimitiveType, EMetalIndexType IndexTyp
 					
 					uint64 MetalSize = StateCache.GetVertexBufferSize(BufferIndex);
 					
-					uint32 MetalStride = StateCache.GetVertexStride(BufferIndex);
-					
 					// If the vertex attribute is required and either no Metal buffer is bound or the size of the buffer is smaller than the stride, or the stride is explicitly specified incorrectly then the layouts don't match.
-					if (BufferLayoutStride > 0 && (MetalSize < BufferLayoutStride || (MetalStride > 0 && MetalStride != BufferLayoutStride)))
+					if (BufferLayoutStride > 0 && MetalSize < BufferLayoutStride)
 					{
-						FString Report = FString::Printf(TEXT("Vertex Layout Mismatch: Index: %d, Len: %lld, Decl. Stride: %d, Stream Stride: %d"), Attribute.bufferIndex, MetalSize, BufferLayoutStride, StateCache.GetVertexStride(BufferIndex));
+						FString Report = FString::Printf(TEXT("Vertex Layout Mismatch: Index: %d, Len: %lld, Decl. Stride: %d"), Attribute.bufferIndex, MetalSize, BufferLayoutStride);
 						UE_LOG(LogMetal, Warning, TEXT("%s"), *Report);
 					}
 				}
@@ -1147,20 +1175,19 @@ bool FMetalContext::PrepareToDraw(uint32 PrimitiveType, EMetalIndexType IndexTyp
 	}
 #endif
 	
-#if PLATFORM_MAC
-	StateCache.SetPrimitiveTopology(TranslatePrimitiveTopology(PrimitiveType));
-#endif
-	
 	// @todo Handle the editor not setting a depth-stencil target for the material editor's tiles which render to depth even when they shouldn't.
-	bool const bNeedsDepthStencilWrite = (IsValidRef(CurrentBoundShaderState->PixelShader) && (CurrentBoundShaderState->PixelShader->Bindings.InOutMask & 0x8000) && !StateCache.HasValidDepthStencilSurface() && StateCache.GetRenderPipelineDesc().PipelineDescriptor.depthAttachmentPixelFormat == MTLPixelFormatInvalid && !FShaderCache::IsPredrawCall(StateCache.GetShaderCacheStateObject()));
+	bool const bNeedsDepthStencilWrite = (IsValidRef(CurrentPSO->PixelShader) && (CurrentPSO->PixelShader->Bindings.InOutMask & 0x8000));
 	
 	// @todo Improve the way we handle binding a dummy depth/stencil so we can get pure UAV raster operations...
-	bool const bNeedsDepthStencilForUAVRaster = (StateCache.GetRenderTargetsInfo().NumColorRenderTargets == 0 && StateCache.GetRenderTargetsInfo().NumUAVs > 0 /*&& !StateCache.HasValidDepthStencilSurface()*/);
+	bool const bNeedsDepthStencilForUAVRaster = (StateCache.GetRenderTargetsInfo().NumColorRenderTargets == 0 && StateCache.GetRenderTargetsInfo().NumUAVs > 0);
 	
-	if (bNeedsDepthStencilWrite || bNeedsDepthStencilForUAVRaster)
+	bool const bBindDepthStencilForWrite = bNeedsDepthStencilWrite && !StateCache.HasValidDepthStencilSurface() && !FShaderCache::IsPredrawCall(StateCache.GetShaderCacheStateObject());
+	bool const bBindDepthStencilForUAVRaster = bNeedsDepthStencilForUAVRaster && !StateCache.HasValidDepthStencilSurface() && !FShaderCache::IsPredrawCall(StateCache.GetShaderCacheStateObject());
+	
+	if (bBindDepthStencilForWrite || bBindDepthStencilForUAVRaster)
 	{
 #if UE_BUILD_DEBUG
-		if (bNeedsDepthStencilWrite)
+		if (bBindDepthStencilForWrite)
 		{
 			UE_LOG(LogMetal, Warning, TEXT("Binding a temporary depth-stencil surface as the bound shader pipeline writes to depth/stencil but no depth/stencil surface was bound!"));
 		}
@@ -1172,14 +1199,14 @@ bool FMetalContext::PrepareToDraw(uint32 PrimitiveType, EMetalIndexType IndexTyp
 #endif
 		check(StateCache.GetRenderTargetArraySize() <= 1);
 		CGSize FBSize;
-		if (bNeedsDepthStencilWrite)
+		if (bBindDepthStencilForWrite)
 		{
-			check(!bNeedsDepthStencilForUAVRaster);
+			check(!bBindDepthStencilForUAVRaster);
 			FBSize = StateCache.GetFrameBufferSize();
 		}
 		else
 		{
-			check(bNeedsDepthStencilForUAVRaster);
+			check(bBindDepthStencilForUAVRaster);
 			FBSize = CGSizeMake(StateCache.GetViewport().width, StateCache.GetViewport().height);
 		}
 		
@@ -1188,14 +1215,14 @@ bool FMetalContext::PrepareToDraw(uint32 PrimitiveType, EMetalIndexType IndexTyp
 		FTexture2DRHIRef FallbackDepthStencilSurface = StateCache.CreateFallbackDepthStencilSurface(FBSize.width, FBSize.height);
 		check(IsValidRef(FallbackDepthStencilSurface));
 		
-		if (bNeedsDepthStencilWrite)
+		if (bBindDepthStencilForWrite)
 		{
-			check(!bNeedsDepthStencilForUAVRaster);
+			check(!bBindDepthStencilForUAVRaster);
 			Info.DepthStencilRenderTarget.Texture = FallbackDepthStencilSurface;
 		}
 		else
 		{
-			check(bNeedsDepthStencilForUAVRaster);
+			check(bBindDepthStencilForUAVRaster);
 			Info.DepthStencilRenderTarget = FRHIDepthRenderTargetView(FallbackDepthStencilSurface, ERenderTargetLoadAction::ELoad, ERenderTargetStoreAction::ENoAction, FExclusiveDepthStencil::DepthRead_StencilRead);
 		}
 		
@@ -1204,7 +1231,7 @@ bool FMetalContext::PrepareToDraw(uint32 PrimitiveType, EMetalIndexType IndexTyp
 			RenderPass.RestartRenderPass(StateCache.GetRenderPassDescriptor());
 		}
 		
-		if (bNeedsDepthStencilForUAVRaster)
+		if (bBindDepthStencilForUAVRaster)
 		{
 			MTLScissorRect Rect = {0, 0, (NSUInteger)FBSize.width, (NSUInteger)FBSize.height};
 			StateCache.SetScissorRect(false, Rect);
@@ -1216,12 +1243,28 @@ bool FMetalContext::PrepareToDraw(uint32 PrimitiveType, EMetalIndexType IndexTyp
 			check(StateCache.GetHasValidRenderTarget());
 		}
 	}
+	else if (!bNeedsDepthStencilWrite && !bNeedsDepthStencilForUAVRaster && StateCache.GetFallbackDepthStencilBound())
+	{
+		FRHISetRenderTargetsInfo Info = StateCache.GetRenderTargetsInfo();
+		Info.DepthStencilRenderTarget.Texture = nullptr;
+		
+		RenderPass.EndRenderPass();
+		
+		StateCache.SetRenderTargetsActive(false);
+		StateCache.SetRenderTargetsInfo(Info, StateCache.GetVisibilityResultsBuffer(), false);
+		
+		RenderPass.BeginRenderPass(StateCache.GetRenderPassDescriptor());
+		
+		// Enforce calls to SetRenderTarget prior to issuing draw calls.
+		if(!FShaderCache::IsPredrawCall(StateCache.GetShaderCacheStateObject()))
+		{
+			check(StateCache.GetHasValidRenderTarget());
+		}
+	}
 	
 	// make sure the BSS has a valid pipeline state object
 	StateCache.SetIndexType(IndexType);
-	FMetalShaderPipeline* PipelineState = CurrentBoundShaderState->PrepareToDraw(VertexDesc, StateCache.GetRenderPipelineDesc());
-	
-	StateCache.SetPipelineState(PipelineState);
+	check(CurrentPSO->GetPipeline(IndexType));
 	
 	return true;
 }
@@ -1299,12 +1342,12 @@ void FMetalContext::SetRenderTargetsInfo(const FRHISetRenderTargetsInfo& RenderT
 
 uint32 FMetalContext::AllocateFromRingBuffer(uint32 Size, uint32 Alignment)
 {
-	return RenderPass.GetRingBuffer()->Allocate(Size, Alignment);
+	return RenderPass.GetRingBuffer().Allocate(Size, Alignment);
 }
 
 id<MTLBuffer> FMetalContext::GetRingBuffer()
 {
-	return RenderPass.GetRingBuffer()->Buffer;
+	return RenderPass.GetRingBuffer().Buffer->Buffer;
 }
 
 void FMetalContext::DrawPrimitive(uint32 PrimitiveType, uint32 BaseVertexIndex, uint32 NumPrimitives, uint32 NumInstances)
@@ -1319,7 +1362,7 @@ void FMetalContext::DrawPrimitive(uint32 PrimitiveType, uint32 BaseVertexIndex, 
 	
 	if(!FShaderCache::IsPredrawCall(StateCache.GetShaderCacheStateObject()))
 	{
-		FShaderCache::LogDraw(StateCache.GetShaderCacheStateObject(), 0);
+		FShaderCache::LogDraw(StateCache.GetShaderCacheStateObject(), PrimitiveType, 0);
 	}
 }
 
@@ -1335,7 +1378,7 @@ void FMetalContext::DrawPrimitiveIndirect(uint32 PrimitiveType, FMetalVertexBuff
 	
 	if(!FShaderCache::IsPredrawCall(StateCache.GetShaderCacheStateObject()))
 	{
-		FShaderCache::LogDraw(StateCache.GetShaderCacheStateObject(), 0);
+		FShaderCache::LogDraw(StateCache.GetShaderCacheStateObject(), PrimitiveType, 0);
 	}
 }
 
@@ -1351,7 +1394,7 @@ void FMetalContext::DrawIndexedPrimitive(id<MTLBuffer> IndexBuffer, uint32 Index
 	
 	if(!FShaderCache::IsPredrawCall(StateCache.GetShaderCacheStateObject()))
 	{
-		FShaderCache::LogDraw(StateCache.GetShaderCacheStateObject(), IndexStride);
+		FShaderCache::LogDraw(StateCache.GetShaderCacheStateObject(), PrimitiveType, IndexStride);
 	}
 }
 
@@ -1367,7 +1410,7 @@ void FMetalContext::DrawIndexedIndirect(FMetalIndexBuffer* IndexBuffer, uint32 P
 	
 	if(!FShaderCache::IsPredrawCall(StateCache.GetShaderCacheStateObject()))
 	{
-		FShaderCache::LogDraw(StateCache.GetShaderCacheStateObject(), IndexBuffer->GetStride());
+		FShaderCache::LogDraw(StateCache.GetShaderCacheStateObject(), PrimitiveType, IndexBuffer->GetStride());
 	}
 }
 
@@ -1383,7 +1426,7 @@ void FMetalContext::DrawIndexedPrimitiveIndirect(uint32 PrimitiveType,FMetalInde
 	
 	if(!FShaderCache::IsPredrawCall(StateCache.GetShaderCacheStateObject()))
 	{
-		FShaderCache::LogDraw(StateCache.GetShaderCacheStateObject(), IndexBuffer->GetStride());
+		FShaderCache::LogDraw(StateCache.GetShaderCacheStateObject(), PrimitiveType, IndexBuffer->GetStride());
 	}
 }
 

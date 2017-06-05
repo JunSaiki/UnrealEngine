@@ -90,6 +90,13 @@ void FD3D12CommandContext::RHISetStreamSource(uint32 StreamIndex, FVertexBufferR
 	StateCache.SetStreamSource(VertexBuffer ? &VertexBuffer->ResourceLocation : nullptr, StreamIndex, Stride, Offset);
 }
 
+void FD3D12CommandContext::RHISetStreamSource(uint32 StreamIndex, FVertexBufferRHIParamRef VertexBufferRHI, uint32 Offset)
+{
+	FD3D12VertexBuffer* VertexBuffer = RetrieveObject<FD3D12VertexBuffer>(VertexBufferRHI);
+ensure(0);
+	//StateCache.SetStreamSource(VertexBuffer ? &VertexBuffer->ResourceLocation : nullptr, StreamIndex, Offset);
+}
+
 // Stream-Out state.
 void FD3D12DynamicRHI::RHISetStreamOutTargets(uint32 NumTargets, const FVertexBufferRHIParamRef* VertexBuffers, const uint32* Offsets)
 {

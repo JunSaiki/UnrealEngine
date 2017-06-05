@@ -239,6 +239,7 @@ public:
 	virtual void RHIBeginScene() final override;
 	virtual void RHIEndScene() final override;
 	virtual void RHISetStreamSource(uint32 StreamIndex, FVertexBufferRHIParamRef VertexBuffer, uint32 Stride, uint32 Offset) final override;
+	virtual void RHISetStreamSource(uint32 StreamIndex, FVertexBufferRHIParamRef VertexBuffer, uint32 Offset) final override;
 	virtual void RHISetRasterizerState(FRasterizerStateRHIParamRef NewState) final override;
 	virtual void RHISetViewport(uint32 MinX, uint32 MinY, float MinZ, uint32 MaxX, uint32 MaxY, float MaxZ) final override;
 	virtual void RHISetStereoViewport(uint32 LeftMinX, uint32 RightMinX, uint32 MinY, float MinZ, uint32 LeftMaxX, uint32 RightMaxX, uint32 MaxY, float MaxZ) final override;
@@ -515,6 +516,10 @@ public:
 	FORCEINLINE virtual void RHISetStreamSource(uint32 StreamIndex, FVertexBufferRHIParamRef VertexBuffer, uint32 Stride, uint32 Offset) final override
 	{
 		ContextRedirect(RHISetStreamSource(StreamIndex, VertexBuffer, Stride, Offset));
+	}
+	FORCEINLINE virtual void RHISetStreamSource(uint32 StreamIndex, FVertexBufferRHIParamRef VertexBuffer, uint32 Offset) final override
+	{
+		ContextRedirect(RHISetStreamSource(StreamIndex, VertexBuffer, Offset));
 	}
 	FORCEINLINE virtual void RHISetRasterizerState(FRasterizerStateRHIParamRef NewState) final override
 	{

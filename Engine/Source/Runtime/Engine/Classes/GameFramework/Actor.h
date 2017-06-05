@@ -2618,6 +2618,7 @@ public:
 	 *	@param bEnableStreaming	- Whether to start (true) or stop (false) streaming
 	 *	@param CinematicTextureGroups - Bitfield indicating which texture groups that use extra high-resolution mips
 	 */
+	UFUNCTION(BlueprintCallable, Category = "Rendering")
 	virtual void PrestreamTextures( float Seconds, bool bEnableStreaming, int32 CinematicTextureGroups = 0 );
 
 	/**

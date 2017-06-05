@@ -10,10 +10,9 @@
 #include "RenderUtils.h"
 #include "Containers/ResourceArray.h"
 
-uint8 FMetalSurface::NextKey = 1; // 0 is reserved for MTLPixelFormatInvalid
-int32 FMetalSurface::ActiveUploads = 0;
+volatile int64 FMetalSurface::ActiveUploads = 0;
 
-int32 GMetalMaxOutstandingAsyncTexUploads = 0;
+int32 GMetalMaxOutstandingAsyncTexUploads = 100 * 1024 * 1024;
 FAutoConsoleVariableRef CVarMetalMaxOutstandingAsyncTexUploads(
 	TEXT("rhi.Metal.MaxOutstandingAsyncTexUploads"),
 	GMetalMaxOutstandingAsyncTexUploads,
@@ -112,8 +111,12 @@ static MTLTextureUsage ConvertFlagsToUsage(uint32 Flags)
 		Usage |= MTLTextureUsageShaderWrite;
 		Usage |= MTLTextureUsagePixelFormatView;
 	}
-	
-	if (Flags & (TexCreate_RenderTargetable|TexCreate_DepthStencilTargetable))
+    
+    //if the high level is doing manual resolves then the textures specifically markes as resolve targets
+    //are likely to be used in a manual shader resolve by the high level and must be bindable as rendertargets.
+    const bool bSeparateResolveTargets = FMetalCommandQueue::SupportsSeparateMSAAAndResolveTarget();
+    const bool bResolveTarget = (Flags & TexCreate_ResolveTargetable);
+    if ((Flags & (TexCreate_RenderTargetable|TexCreate_DepthStencilTargetable)) || (bResolveTarget && bSeparateResolveTargets))
 	{
 		Usage |= MTLTextureUsageRenderTarget;
 		Usage |= MTLTextureUsageShaderRead;
@@ -171,7 +174,7 @@ void SafeReleaseMetalTexture(FMetalSurface* Surface, id<MTLTexture> Texture, boo
 {
 	static bool bSupportsHeaps = GetMetalDeviceContext().SupportsFeature(EMetalFeaturesHeaps);
 	id<TMTLTexture> TTexture = (id<TMTLTexture>)Texture;
-	if(GIsRHIInitialized && GDynamicRHI)
+	if(GIsRHIInitialized && GDynamicRHI && !bTextureView && !bAVFoundationTexture)
 	{
 		GetMetalDeviceContext().ReleaseTexture(Surface, Texture);
 		SafeReleaseMetalResource(Texture);
@@ -210,16 +213,38 @@ void FMetalSurface::PrepareTextureView()
 			StencilTexture = Reallocate(StencilTexture, MTLTextureUsagePixelFormatView);
 			SafeReleaseMetalTexture(this, OldStencilTexture, bTextureView, CoreVideoImageRef != nullptr);
 		}
-		if (MSAATexture && (MSAATexture != Texture))
+
+		check(Texture);
+		const bool bMSAATextureIsTexture = MSAATexture == Texture;
+		const bool bMSAAResolveTextureIsTexture = MSAAResolveTexture == Texture;
+		if (MSAATexture && !bMSAATextureIsTexture)
 		{
 			id<MTLTexture> OldMSAATexture = MSAATexture;
 			MSAATexture = Reallocate(MSAATexture, MTLTextureUsagePixelFormatView);
 			SafeReleaseMetalTexture(this, OldMSAATexture, bTextureView, CoreVideoImageRef != nullptr);
 		}
+		if (MSAAResolveTexture && !bMSAAResolveTextureIsTexture)
+		{
+			id<MTLTexture> OldMSAAResolveTexture = MSAAResolveTexture;
+			MSAAResolveTexture = Reallocate(MSAAResolveTexture, MTLTextureUsagePixelFormatView);
+			SafeReleaseMetalTexture(this, OldMSAAResolveTexture, bTextureView, CoreVideoImageRef != nullptr);
+		}
+
 		id<MTLTexture> OldTexture = Texture;
 		Texture = Reallocate(Texture, MTLTextureUsagePixelFormatView);
 		SafeReleaseMetalTexture(this, OldTexture, bTextureView, CoreVideoImageRef != nullptr);
-	}
+
+		if (bMSAATextureIsTexture)
+		{
+            [MSAATexture release];
+			MSAATexture = [Texture retain];
+		}
+		if (bMSAAResolveTextureIsTexture)
+		{
+            [MSAAResolveTexture release];
+			MSAAResolveTexture = [Texture retain];
+		}
+	}	
 }
 	
 id<MTLTexture> FMetalSurface::Reallocate(id<MTLTexture> InTexture, MTLTextureUsage UsageModifier)
@@ -271,12 +296,10 @@ void FMetalSurface::ReplaceTexture(FMetalContext& Context, id<MTLTexture> Curren
 				const uint32 MipSizeY = (bPixelFormatASTC) ? AlignArbitrary(UnalignedMipSizeY, BlockSizeY) : UnalignedMipSizeY;
 				const uint32 MipSizeZ = (bPixelFormatASTC) ? AlignArbitrary(UnalignedMipSizeZ, BlockSizeZ) : UnalignedMipSizeZ;
 	
-				Context.AsyncCopyFromTextureToTexture(CurrentTexture, SliceIndex, MipIndex, Origin, MTLSizeMake(MipSizeX, MipSizeY, MipSizeZ), NewTexture, SliceIndex, MipIndex, Origin);
+				Context.CopyFromTextureToTexture(CurrentTexture, SliceIndex, MipIndex, Origin, MTLSizeMake(MipSizeX, MipSizeY, MipSizeZ), NewTexture, SliceIndex, MipIndex, Origin);
 			}
 		}
 	
-		// kick it off!
-		Context.SubmitAsyncCommands(nil, nil, false);
 	}
 
 	id<MTLTexture> OldTexture = Texture;
@@ -300,7 +323,7 @@ void FMetalSurface::ReplaceTexture(FMetalContext& Context, id<MTLTexture> Curren
 		}
 		}
 	if (MSAATexture && MSAATexture == CurrentTexture)
-	{
+	{		
 		if (MSAATexture && (MSAATexture != OldTexture))
 		{
 			id<MTLTexture> OldMSAATexture = MSAATexture;
@@ -311,6 +334,21 @@ void FMetalSurface::ReplaceTexture(FMetalContext& Context, id<MTLTexture> Curren
 		{
 			[MSAATexture release];
 			MSAATexture = [NewTexture retain];
+	}
+
+	if (MSAAResolveTexture && MSAAResolveTexture == CurrentTexture)
+	{
+		if (MSAAResolveTexture && (MSAAResolveTexture != OldTexture))
+		{
+			id<MTLTexture> OldMSAAResolveTexture = MSAAResolveTexture;
+			SafeReleaseMetalObject(OldMSAAResolveTexture);
+			MSAAResolveTexture = NewTexture;
+		}
+		else if (MSAAResolveTexture)
+		{
+			[MSAAResolveTexture release];
+			MSAAResolveTexture = [NewTexture retain];
+		}
 	}
 }
 
@@ -452,20 +490,9 @@ void FMetalSurface::Init(FMetalSurface& Source, NSRange MipRange)
         Texture = [Source.Texture newTextureViewWithPixelFormat:MetalFormat textureType:Source.Texture.textureType levels:MipRange slices:Slices];
 		TRACK_OBJECT(STAT_MetalTextureCount, Texture);
 	}
-    else
-    {
-        Texture = [Source.Texture retain];
-    }
-	if(Source.MSAATexture)
+	else
 	{
-		MSAATexture = [Texture retain];
-	}
-	if(Source.StencilTexture)
-	{
-#if PLATFORM_IOS
-		check(false); // @todo Zebra Must handle separate stencil texture SRV!
-#endif
-		StencilTexture = [Texture retain];
+		Texture = [Source.Texture retain];
 	}
 	
 	const uint32 BlockSizeX = GPixelFormats[PixelFormat].BlockSizeX;
@@ -499,14 +526,15 @@ void FMetalSurface::Init(FMetalSurface& Source, NSRange MipRange, EPixelFormat F
         Texture = [Source.Texture newTextureViewWithPixelFormat:MetalFormat textureType:Source.Texture.textureType levels:MipRange slices:Slices];
 		TRACK_OBJECT(STAT_MetalTextureCount, Texture);
     }
-#if PLATFORM_MAC // Currently only required on Mac as iOS uses separate textures
-    else if (Source.PixelFormat == PF_DepthStencil && Format == PF_X24_G8 && GetMetalDeviceContext().SupportsFeature(EMetalFeaturesStencilView))
+    else if (Source.PixelFormat == PF_DepthStencil && Format == PF_X24_G8 && GetMetalDeviceContext().SupportsFeature(EMetalFeaturesStencilView) && GPixelFormats[PF_DepthStencil].PlatformFormat != MTLPixelFormatDepth32Float)
     {
         switch (Source.Texture.pixelFormat)
         {
+#if PLATFORM_MAC // Currently only required on Mac as iOS uses separate textures
             case MTLPixelFormatDepth24Unorm_Stencil8:
                 MetalFormat = MTLPixelFormatX24_Stencil8;
                 break;
+#endif
             case MTLPixelFormatDepth32Float_Stencil8:
                 MetalFormat = MTLPixelFormatX32_Stencil8;
                 break;
@@ -518,7 +546,6 @@ void FMetalSurface::Init(FMetalSurface& Source, NSRange MipRange, EPixelFormat F
         Texture = [Source.Texture newTextureViewWithPixelFormat:MetalFormat textureType:Source.Texture.textureType levels:MipRange slices:Slices];
         TRACK_OBJECT(STAT_MetalTextureCount, Texture);
     }
-#endif
 	else if(Source.PixelFormat == PF_DepthStencil && Format == PF_X24_G8)
 	{
 		check(Source.Type == RRT_Texture2D); // Only 2D Textures can be X24_G8 SRVs
@@ -592,11 +619,7 @@ void FMetalSurface::Init(FMetalSurface& Source, NSRange MipRange, EPixelFormat F
     {
         Texture = [Source.Texture retain];
 	}
-	
-	if(Source.MSAATexture)
-	{
-		MSAATexture = [Texture retain];
-	}
+
 	if(Source.StencilTexture && !StencilTexture)
 	{
 		StencilTexture = [Texture retain];
@@ -615,6 +638,7 @@ FMetalSurface::FMetalSurface(FMetalSurface& Source, NSRange MipRange)
 , PixelFormat(Source.PixelFormat)
 , Texture(nil)
 , MSAATexture(nil)
+, MSAAResolveTexture(nil)
 , StencilTexture(nil)
 , SizeX(Source.SizeX)
 , SizeY(Source.SizeY)
@@ -639,6 +663,7 @@ FMetalSurface::FMetalSurface(FMetalSurface& Source, NSRange const MipRange, EPix
 , PixelFormat(Format)
 , Texture(nil)
 , MSAATexture(nil)
+, MSAAResolveTexture(nil)
 , StencilTexture(nil)
 , SizeX(Source.SizeX)
 , SizeY(Source.SizeY)
@@ -658,7 +683,7 @@ FMetalSurface::FMetalSurface(FMetalSurface& Source, NSRange const MipRange, EPix
 	FMemory::Memzero(LockedMemory, sizeof(LockedMemory));
 }
 
-static MTLPixelFormat ToSRGBFormat(MTLPixelFormat LinMTLFormat)
+MTLPixelFormat ToSRGBFormat(MTLPixelFormat LinMTLFormat)
 {
 	MTLPixelFormat MTLFormat = LinMTLFormat;
 
@@ -717,11 +742,31 @@ static MTLPixelFormat ToSRGBFormat(MTLPixelFormat LinMTLFormat)
 	return MTLFormat;
 }
 
+static TMap<uint32, uint8>& GetMetalPixelFormatKeyMap()
+{
+	static TMap<uint32, uint8> PixelFormatKeyMap;
+	return PixelFormatKeyMap;
+}
+
+uint8 GetMetalPixelFormatKey(MTLPixelFormat Format)
+{
+	static uint8 NextKey = 1; // 0 is reserved for MTLPixelFormatInvalid
+	uint8* Key = GetMetalPixelFormatKeyMap().Find(Format);
+	if (Key == NULL)
+	{
+		Key = &GetMetalPixelFormatKeyMap().Add(Format, NextKey++);
+		// only giving 5 bits to the key
+		checkf(NextKey < 32, TEXT("Too many unique pixel formats to fit into the PipelineStateHash"));
+	}
+	return *Key;
+}
+
 FMetalSurface::FMetalSurface(ERHIResourceType ResourceType, EPixelFormat Format, uint32 InSizeX, uint32 InSizeY, uint32 InSizeZ, uint32 NumSamples, bool bArray, uint32 ArraySize, uint32 NumMips, uint32 InFlags, FResourceBulkDataInterface* BulkData)
 	: Type(ResourceType)
 	, PixelFormat(Format)
 	, Texture(nil)
     , MSAATexture(nil)
+	, MSAAResolveTexture(nil)
 	, StencilTexture(nil)
 	, SizeX(InSizeX)
 	, SizeY(InSizeY)
@@ -735,18 +780,18 @@ FMetalSurface::FMetalSurface(ERHIResourceType ResourceType, EPixelFormat Format,
 	, bTextureView(false)
 {
 	// get a unique key for this surface's format
-	static TMap<uint32, uint8> PixelFormatKeyMap;
+	TMap<uint32, uint8>& PixelFormatKeyMap = GetMetalPixelFormatKeyMap();
 	if (PixelFormatKeyMap.Num() == 0)
 	{
 		// Add depth stencil formats fist, so we don't have to use 5 bits for them in the pipeline hash
-		PixelFormatKeyMap.Add(MTLPixelFormatDepth32Float, NextKey++);
-		PixelFormatKeyMap.Add(MTLPixelFormatStencil8, NextKey++);
-		PixelFormatKeyMap.Add(MTLPixelFormatDepth32Float_Stencil8, NextKey++);
+		GetMetalPixelFormatKey(MTLPixelFormatDepth32Float);
+		GetMetalPixelFormatKey(MTLPixelFormatStencil8);
+		GetMetalPixelFormatKey(MTLPixelFormatDepth32Float_Stencil8);
 #if PLATFORM_MAC
-		PixelFormatKeyMap.Add(MTLPixelFormatDepth24Unorm_Stencil8, NextKey++);
+		GetMetalPixelFormatKey(MTLPixelFormatDepth24Unorm_Stencil8);
         if (GetMetalDeviceContext().SupportsFeature(EMetalFeaturesDepth16))
         {
-            PixelFormatKeyMap.Add(MTLPixelFormatDepth16Unorm, NextKey++);
+            GetMetalPixelFormatKey(MTLPixelFormatDepth16Unorm);
         }
 #endif
 	}
@@ -773,16 +818,8 @@ FMetalSurface::FMetalSurface(ERHIResourceType ResourceType, EPixelFormat Format,
 		MTLFormat = ToSRGBFormat(MTLFormat);
 	}
 
-	uint8* Key = PixelFormatKeyMap.Find(MTLFormat);
-	if (Key == NULL)
-	{
-		Key = &PixelFormatKeyMap.Add(MTLFormat, NextKey++);
-
-		// only giving 5 bits to the key
-		checkf(NextKey < 32, TEXT("Too many unique pixel formats to fit into the PipelineStateHash"));
-	}
 	// set the key
-	FormatKey = *Key;
+	FormatKey = GetMetalPixelFormatKey(MTLFormat);
 
 	FMemory::Memzero(LockedMemory, sizeof(LockedMemory));
 
@@ -830,17 +867,15 @@ FMetalSurface::FMetalSurface(ERHIResourceType ResourceType, EPixelFormat Format,
 		Desc.arrayLength = ArraySize;
 		if (bIsCubemap)
 		{
-#if PLATFORM_MAC
-			Desc.textureType = MTLTextureTypeCubeArray;
-			if (GMaxRHIShaderPlatform == SP_METAL_MRT_MAC)
+			if (FMetalCommandQueue::SupportsFeature(EMetalFeaturesCubemapArrays))
+			{
+				Desc.textureType = (MTLTextureType)EMTLTextureTypeCubeArray;
+			}
+			else
 			{
 				Desc.textureType = MTLTextureType2DArray;
 				Desc.arrayLength = ArraySize * 6;
 			}
-#else
-			Desc.textureType = MTLTextureType2DArray;
-			Desc.arrayLength = ArraySize * 6;
-#endif
 		}
 	}
 	Desc.mipmapLevelCount = NumMips;
@@ -957,6 +992,7 @@ FMetalSurface::FMetalSurface(ERHIResourceType ResourceType, EPixelFormat Format,
 	// calculate size of the texture
 	TotalTextureSize = GetMemorySize();
 
+	const bool bSupportsMSAADepthResolve = GetMetalDeviceContext().SupportsFeature(EMetalFeaturesMSAADepthResolve);
 	if (!FParse::Param(FCommandLine::Get(), TEXT("nomsaa")))
 	{
 		if (NumSamples > 1)
@@ -969,7 +1005,11 @@ FMetalSurface::FMetalSurface(ERHIResourceType ResourceType, EPixelFormat Format,
 			Desc.sampleCount = NumSamples;
 
 			MSAATexture = GetMetalDeviceContext().CreateTexture(this, Desc);
-			if (Format == PF_DepthStencil)
+
+			//device doesn't support HW depth resolve.  This case only valid on mobile renderer or 
+			//on Mac where RHISupportsSeparateMSAAAndResolveTextures is true.
+            const bool bDepthButNoResolveSupported = Format == PF_DepthStencil && !bSupportsMSAADepthResolve;
+			if (bDepthButNoResolveSupported)
 			{
 				[Texture release];
 				Texture = [MSAATexture retain];
@@ -982,6 +1022,27 @@ FMetalSurface::FMetalSurface(ERHIResourceType ResourceType, EPixelFormat Format,
 				// an MSAA render target takes NumSamples more space, in addition to the resolve texture
 				TotalTextureSize += TotalTextureSize * NumSamples;
 			}
+
+			if (MSAATexture != Texture)
+			{
+				check(!MSAAResolveTexture);
+
+				//if bSupportsSeparateMSAAAndResolve then the high level expect to binds the MSAA when binding shader params.
+				const bool bSupportsSeparateMSAAAndResolve = FMetalCommandQueue::SupportsSeparateMSAAAndResolveTarget();
+				if (bSupportsSeparateMSAAAndResolve)
+				{
+					MSAAResolveTexture = [Texture retain];
+					[Texture release];
+					Texture = [MSAATexture retain];
+				}
+				else
+				{
+					MSAAResolveTexture = [Texture retain];
+				}
+			}
+
+			//we always require an MSAAResolveTexture if MSAATexture is active.			
+			check(!MSAATexture || MSAAResolveTexture || bDepthButNoResolveSupported);
         
 			NSLog(@"Creating %dx MSAA %d x %d %s surface", (int32)Desc.sampleCount, SizeX, SizeY, (Flags & TexCreate_RenderTargetable) ? "Color" : "Depth");
 			if (MSAATexture == nil)
@@ -994,18 +1055,21 @@ FMetalSurface::FMetalSurface(ERHIResourceType ResourceType, EPixelFormat Format,
 	// create a stencil buffer if needed
 	if (Format == PF_DepthStencil)
 	{
-#if PLATFORM_IOS
-		Desc.pixelFormat = MTLPixelFormatStencil8;
-		StencilTexture = GetMetalDeviceContext().CreateTexture(this, Desc);
-		
-		// 1 byte per texel
-		TotalTextureSize += SizeX * SizeY;
-#else
-		StencilTexture = [Texture retain];
-		
-		// 1 byte per texel
-		TotalTextureSize += SizeX * SizeY;
-#endif
+		if(MTLFormat == MTLPixelFormatDepth32Float)
+		{
+			Desc.pixelFormat = MTLPixelFormatStencil8;
+			StencilTexture = GetMetalDeviceContext().CreateTexture(this, Desc);
+			
+			// 1 byte per texel
+			TotalTextureSize += SizeX * SizeY;
+		}
+		else
+		{
+			StencilTexture = [Texture retain];
+			
+			// 1 byte per texel
+			TotalTextureSize += SizeX * SizeY;
+		}
 	}
 
 	// track memory usage
@@ -1131,6 +1195,20 @@ FMetalSurface::~FMetalSurface()
 			[MSAATexture release];
 		}
 	}
+
+
+	//do the same as above.  only do a [release] if it'st he same as texture.
+	if (MSAAResolveTexture != nil)
+	{
+		if (Texture != MSAAResolveTexture)
+        {
+            SafeReleaseMetalTexture(this, MSAAResolveTexture, bTextureView, false);
+        }
+        else
+        {
+            [MSAAResolveTexture release];
+        }
+	}
 	
 	if (StencilTexture != nil)
 	{
@@ -1166,6 +1244,7 @@ FMetalSurface::~FMetalSurface()
 
 	CoreVideoImageRef = nullptr;
 	MSAATexture = nil;
+	MSAAResolveTexture = nil;
 	Texture = nil;
 	StencilTexture = nil;
 	for(uint32 i = 0; i < 16; i++)
@@ -1256,7 +1335,9 @@ void FMetalSurface::UpdateSurface(id<MTLBuffer> Buffer, uint32 MipIndex, uint32 
 	{
 		SCOPED_AUTORELEASE_POOL;
 		
-		int32 Count = FPlatformAtomics::InterlockedIncrement(&ActiveUploads);
+		int64 Size = BytesPerImage * Region.size.depth * FMath::Max(1u, ArrayIndex);
+		
+		int64 Count = FPlatformAtomics::InterlockedAdd(&ActiveUploads, Size);
 		
 		bool const bWait = ((GetMetalDeviceContext().GetNumActiveContexts() == 1) && (GMetalMaxOutstandingAsyncTexUploads > 0) && (Count >= GMetalMaxOutstandingAsyncTexUploads));
 		
@@ -1273,7 +1354,7 @@ void FMetalSurface::UpdateSurface(id<MTLBuffer> Buffer, uint32 MipIndex, uint32 
 #endif
 		MTLCommandBufferHandler CompletionHandler = ^(id <MTLCommandBuffer>)
 		{
-			FPlatformAtomics::InterlockedDecrement(&ActiveUploads);
+			FPlatformAtomics::InterlockedAdd(&ActiveUploads, -Size);
 #if STATS
 			int64 Taken = FPlatformTime::Cycles64() - *Cycles;
 			delete Cycles;
@@ -1283,7 +1364,7 @@ void FMetalSurface::UpdateSurface(id<MTLBuffer> Buffer, uint32 MipIndex, uint32 
 		GetMetalDeviceContext().SubmitAsyncCommands(ScheduledHandler, CompletionHandler, bWait);
 		GetMetalDeviceContext().ReleaseResource(Buffer);
 		
-		INC_DWORD_STAT_BY(STAT_MetalTextureMemUpdate, BytesPerImage * Region.size.depth * FMath::Max(1u, ArrayIndex));
+		INC_DWORD_STAT_BY(STAT_MetalTextureMemUpdate, Size);
 		
 		if (bWait)
 		{
@@ -1613,28 +1694,6 @@ void FMetalSurface::UpdateSRV(FMetalContext* Context, FTextureRHIRef SourceTex)
 			SafeReleasePooledBuffer(Buffer);
 		}
 	}
-	// Handle the case where a texture or render-target is created without PixelFormatView & then recreated with it enabled in order to create appropriate SRVs.
-	// If an existing SRV simply exposed the source format & mip-levels it won't have a pixel-format-view so we need to update the texture ref we return.
-	else if (PixelFormat == SourceTex->GetFormat() && Texture.mipmapLevelCount == SourceTex->GetNumMips())
-	{
-		FMetalSurface* Surf = GetMetalSurfaceFromRHITexture(SourceTex);
-		check(Surf);
-		if (Texture != Surf->Texture)
-		{
-			if (MSAATexture == Texture)
-			{
-				MSAATexture = [Surf->Texture retain];
-			}
-			if (StencilTexture == Texture)
-			{
-				StencilTexture = [Surf->Texture retain];
-			}
-			SafeReleaseMetalResource(Texture);
-			Texture = [Surf->Texture retain];
-			
-			FPlatformAtomics::InterlockedExchange(&Written, 1);
-		}
-	}
 }
 
 
@@ -1755,53 +1814,55 @@ struct FMetalRHICommandAsyncReallocateTexture2D : public FRHICommand<FMetalRHICo
 	, NewSizeX(InNewSizeX)
 	, NewSizeY(InNewSizeY)
 	, RequestStatus(InRequestStatus)
-{
-}
+	{
+	}
 
 	void Execute(FRHICommandListBase& CmdList)
-{
-		CopyMips(Context, OldTexture, NewTexture, NewMipCount, NewSizeX, NewSizeY, RequestStatus);
-}
-
-	static void CopyMips(FMetalContext& Context, FMetalTexture2D* OldTexture, FMetalTexture2D* NewTexture, int32 NewMipCount, int32 NewSizeX, int32 NewSizeY, FThreadSafeCounter* RequestStatus)
-{
-	// figure out what mips to schedule
-	const uint32 NumSharedMips = FMath::Min(OldTexture->GetNumMips(), NewTexture->GetNumMips());
-	const uint32 SourceMipOffset = OldTexture->GetNumMips() - NumSharedMips;
-	const uint32 DestMipOffset = NewTexture->GetNumMips() - NumSharedMips;
-	
-	const uint32 BlockSizeX = GPixelFormats[OldTexture->GetFormat()].BlockSizeX;
-	const uint32 BlockSizeY = GPixelFormats[OldTexture->GetFormat()].BlockSizeY;
-
-	// only handling straight 2D textures here
-	uint32 SliceIndex = 0;
-	MTLOrigin Origin = MTLOriginMake(0,0,0);
-	
-	id<MTLTexture> Tex = OldTexture->Surface.Texture;
-	[Tex retain];
-
-	// DXT/BC formats on Mac actually do have mip-tails that are smaller than the block size, they end up being uncompressed.
-		bool const bPixelFormatASTC = IsPixelFormatASTCCompressed(OldTexture->GetFormat());
-	
-	for (uint32 MipIndex = 0; MipIndex < NumSharedMips; ++MipIndex)
 	{
+		CopyMips(Context, OldTexture, NewTexture, NewMipCount, NewSizeX, NewSizeY, RequestStatus);
+	}
+	
+	static void CopyMips(FMetalContext& Context, FMetalTexture2D* OldTexture, FMetalTexture2D* NewTexture, int32 NewMipCount, int32 NewSizeX, int32 NewSizeY, FThreadSafeCounter* RequestStatus)
+	{
+		// figure out what mips to schedule
+		const uint32 NumSharedMips = FMath::Min(OldTexture->GetNumMips(), NewTexture->GetNumMips());
+		const uint32 SourceMipOffset = OldTexture->GetNumMips() - NumSharedMips;
+		const uint32 DestMipOffset = NewTexture->GetNumMips() - NumSharedMips;
+		
+		const uint32 BlockSizeX = GPixelFormats[OldTexture->GetFormat()].BlockSizeX;
+		const uint32 BlockSizeY = GPixelFormats[OldTexture->GetFormat()].BlockSizeY;
+	
+		// only handling straight 2D textures here
+		uint32 SliceIndex = 0;
+		MTLOrigin Origin = MTLOriginMake(0,0,0);
+		
+		id<MTLTexture> Tex = OldTexture->Surface.Texture;
+		[Tex retain];
+	
+		// DXT/BC formats on Mac actually do have mip-tails that are smaller than the block size, they end up being uncompressed.
+		bool const bPixelFormatASTC = IsPixelFormatASTCCompressed(OldTexture->GetFormat());
+		
+		for (uint32 MipIndex = 0; MipIndex < NumSharedMips; ++MipIndex)
+		{
 			const uint32 UnalignedMipSizeX = FMath::Max<uint32>(1, NewSizeX >> (MipIndex + DestMipOffset));
 			const uint32 UnalignedMipSizeY = FMath::Max<uint32>(1, NewSizeY >> (MipIndex + DestMipOffset));
 			const uint32 MipSizeX = (bPixelFormatASTC) ? AlignArbitrary(UnalignedMipSizeX, BlockSizeX) : UnalignedMipSizeX;
 			const uint32 MipSizeY = (bPixelFormatASTC) ? AlignArbitrary(UnalignedMipSizeY, BlockSizeY) : UnalignedMipSizeY;
-
+	
 			Context.AsyncCopyFromTextureToTexture(OldTexture->Surface.Texture, SliceIndex, MipIndex + SourceMipOffset, Origin, MTLSizeMake(MipSizeX, MipSizeY, 1), NewTexture->Surface.Texture, SliceIndex, MipIndex + DestMipOffset, Origin);
-	}
-
-	// when done, decrement the counter to indicate it's safe
+		}
+	
+		// when done, decrement the counter to indicate it's safe
 		MTLCommandBufferHandler CompletionHandler = ^(id <MTLCommandBuffer> Buffer)
-	{
-		[Tex release];
-		RequestStatus->Decrement();
+		{
+			[Tex release];
 		};
-
-    // kick it off!
+	
+	    // kck it off!
 		Context.SubmitAsyncCommands(nil, CompletionHandler, false);
+
+		// Like D3D mark this as complete immediately.
+		RequestStatus->Decrement();
 	}
 };
 
@@ -1999,6 +2060,7 @@ void FMetalDynamicRHI::UpdateTexture2D_RenderThread(class FRHICommandListImmedia
 		{
 			Data.AddZeroed(UpdateRegion.Height * UpdateRegion.Width);
 			uint32* Dest = Data.GetData();
+			check(Dest);
 			
 			for(uint y = 0; y < UpdateRegion.Height; y++)
 			{
@@ -2044,6 +2106,7 @@ void FMetalDynamicRHI::RHIUpdateTexture2D(FTexture2DRHIParamRef TextureRHI, uint
 	{
 		Data.AddZeroed(UpdateRegion.Height * UpdateRegion.Width);
 		uint32* Dest = Data.GetData();
+		check(Dest);
 		
 		for(uint y = 0; y < UpdateRegion.Height; y++)
 		{
@@ -2187,6 +2250,7 @@ FTexture2DRHIRef FMetalDynamicRHI::RHICreateTexture2D_RenderThread(class FRHICom
 		
 		// lock, copy, unlock
 		void* LockedData = LockTexture2D_RenderThread(RHICmdList, Result.GetReference(), 0, RLM_WriteOnly, Stride, false);
+		check(LockedData);
 		FMemory::Memcpy(LockedData, CreateInfo.BulkData->GetResourceBulkData(), CreateInfo.BulkData->GetResourceBulkDataSize());
 		UnlockTexture2D_RenderThread(RHICmdList, Result.GetReference(), 0, false);
 		
@@ -2333,6 +2397,7 @@ struct FMetalRHICommandUnaliasTextures : public FRHICommand<FMetalRHICommandUnal
 	
 	FORCEINLINE_DEBUGGABLE FMetalRHICommandUnaliasTextures(FTextureRHIParamRef* InTextures, int32 NumTextures)
 	{
+		check(InTextures && NumTextures);
 		Textures.Append(InTextures, NumTextures);
 	}
 	
@@ -2348,6 +2413,7 @@ struct FMetalRHICommandUnaliasTextures : public FRHICommand<FMetalRHICommandUnal
 
 void FMetalDynamicRHI::RHISetResourceAliasability_RenderThread(class FRHICommandListImmediate& RHICmdList, EResourceAliasability AliasMode, FTextureRHIParamRef* InTextures, int32 NumTextures)
 {
+	check(InTextures && NumTextures);
 	@autoreleasepool
 	{
 		switch(AliasMode)

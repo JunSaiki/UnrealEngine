@@ -29,6 +29,8 @@ public:
 	 */
 	virtual void RHISetComputeShader(FComputeShaderRHIParamRef ComputeShader) override;
 	
+	virtual void RHISetComputePipelineState(FRHIComputePipelineState* ComputePipelineState) override;
+	
 	virtual void RHIDispatchComputeShader(uint32 ThreadGroupCountX, uint32 ThreadGroupCountY, uint32 ThreadGroupCountZ) final override;
 	
 	virtual void RHIDispatchIndirectComputeShader(FVertexBufferRHIParamRef ArgumentBuffer, uint32 ArgumentOffset) final override;
@@ -91,7 +93,8 @@ public:
 	virtual void RHIEndScene() override;
 	
 	virtual void RHISetStreamSource(uint32 StreamIndex, FVertexBufferRHIParamRef VertexBuffer, uint32 Stride, uint32 Offset) final override;
-	
+	virtual void RHISetStreamSource(uint32 StreamIndex, FVertexBufferRHIParamRef VertexBuffer, uint32 Offset) final override;
+
 	virtual void RHISetRasterizerState(FRasterizerStateRHIParamRef NewState) final override;
 	
 	// @param MinX including like Win32 RECT
@@ -113,6 +116,8 @@ public:
 	 * @param BoundShaderState - state resource
 	 */
 	virtual void RHISetBoundShaderState(FBoundShaderStateRHIParamRef BoundShaderState) final override;
+	
+	virtual void RHISetGraphicsPipelineState(FGraphicsPipelineStateRHIParamRef GraphicsState) final override;
 	
 	/** Set the shader resource view of a surface.  This is used for binding TextureMS parameter types that need a multi sampled view. */
 	virtual void RHISetShaderTexture(FVertexShaderRHIParamRef VertexShader, uint32 TextureIndex, FTextureRHIParamRef NewTexture) final override;
@@ -348,6 +353,7 @@ public:
 	
 	virtual void RHISetAsyncComputeBudget(EAsyncComputeBudget Budget) final override;
 	virtual void RHISetComputeShader(FComputeShaderRHIParamRef ComputeShader) final override;
+	virtual void RHISetComputePipelineState(FRHIComputePipelineState* ComputePipelineState) final override;
 	virtual void RHISubmitCommandsHint() final override;
 };
 

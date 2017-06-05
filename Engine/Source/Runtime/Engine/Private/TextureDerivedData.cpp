@@ -803,7 +803,7 @@ class FTextureCacheDerivedDataWorker : public FNonAbandonableTask
 					}
 					else
 					{
-						check(CompressedImage.PixelFormat == DerivedData->PixelFormat);
+						checkf(CompressedImage.PixelFormat == DerivedData->PixelFormat, TEXT("compressed format: %i, derived format: %i, mipindex: %i"), CompressedImage.PixelFormat, DerivedData->PixelFormat, MipIndex);
 					}
 				}
 				DerivedData->NumSlices = BuildSettings.bCubemap ? 6 : 1;

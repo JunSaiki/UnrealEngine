@@ -224,6 +224,7 @@ END_UNIFORM_BUFFER_STRUCT(FYCbCrConvertUB)
 
 IMPLEMENT_UNIFORM_BUFFER_STRUCT(FYCbCrConvertUB, TEXT("YCbCrConvertUB"));
 IMPLEMENT_SHADER_TYPE(, FYCbCrConvertPS, TEXT("MediaShaders"), TEXT("YCbCrConvertPS"), SF_Pixel);
+IMPLEMENT_SHADER_TYPE(, FYCbCrConvertPS_4x4Matrix, TEXT("MediaShaders"), TEXT("YCbCrConvertPS_4x4Matrix"), SF_Pixel);
 
 
 void FYCbCrConvertPS::SetParameters(FRHICommandList& CommandList, TRefCountPtr<FRHITexture2D> LumaTexture, TRefCountPtr<FRHITexture2D> CbCrTexture, const FMatrix& ColorTransform, bool SrgbToLinear)

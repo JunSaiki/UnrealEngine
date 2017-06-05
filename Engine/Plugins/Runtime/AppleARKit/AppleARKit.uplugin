@@ -1,0 +1,27 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "Apple ARKit",
+	"Description": "",
+	"Category": "Augmented Reality",
+	"CreatedBy": "",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"Modules": [
+		{
+			"Name": "AppleARKit",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "AppleARKitEditor",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		}
+	]
+}

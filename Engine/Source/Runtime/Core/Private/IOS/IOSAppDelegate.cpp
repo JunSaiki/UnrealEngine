@@ -23,7 +23,7 @@
 #if (UE_BUILD_SHIPPING || UE_BUILD_TEST)
 #define GAME_THREAD_STACK_SIZE 1024 * 1024
 #else
-#define GAME_THREAD_STACK_SIZE 8 * 1024 * 1024
+#define GAME_THREAD_STACK_SIZE 16 * 1024 * 1024
 #endif
 
 DEFINE_LOG_CATEGORY(LogIOSAudioSession);
@@ -98,6 +98,23 @@ void InstallSignalHandlers()
 @synthesize IOSController;
 @synthesize SlateController;
 @synthesize timer;
+
+-(void)dealloc
+{
+#if !UE_BUILD_SHIPPING && !PLATFORM_TVOS
+	[ConsoleAlert release];
+#ifdef __IPHONE_8_0
+	[ConsoleAlert release];
+#endif
+	[ConsoleHistoryValues release];
+#endif
+	[Window release];
+	[IOSView release];
+	[IOSController release];
+	[SlateController release];
+	[timer release];
+	[super dealloc];
+}
 
 -(void) ParseCommandLineOverrides
 {
@@ -507,7 +524,7 @@ void InstallSignalHandlers()
 		// use IPhone6 image for now
 		[ImageString appendString : @"-IPhone6Plus-Landscape"];
 	}
-	else if (Device == FPlatformMisc::IOS_IPadPro)
+	else if (Device == FPlatformMisc::IOS_IPadPro_129)
 	{
 		if (!self.bDeviceInPortraitMode)
 		{
@@ -858,6 +875,12 @@ void InstallSignalHandlers()
 }
 
 #endif
+
+- (NSUInteger)application:(UIApplication*)application supportedInterfaceOrientationsForWindow:(UIWindow*)window
+{
+	// UIImagePickerController or GameCenter might have portrait-only variant and will throw exception if portrait is not supported here
+	return UIInterfaceOrientationMaskAll;
+}
 
 /**
  * Shows the given Game Center supplied controller on the screen

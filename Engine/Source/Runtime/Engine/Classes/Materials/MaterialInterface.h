@@ -52,9 +52,11 @@ struct ENGINE_API FMaterialRelevance
 	uint32 bOpaque : 1;
 	uint32 bMasked : 1;
 	uint32 bDistortion : 1;
-	uint32 bSeparateTranslucency : 1;
+	uint32 bSeparateTranslucency : 1; // Translucency After DOF
 	uint32 bMobileSeparateTranslucency : 1;
 	uint32 bNormalTranslucency : 1;
+	uint32 bUsesSceneColorCopy : 1;
+	uint32 bDisableOffscreenRendering : 1; // Blend Modulate
 	uint32 bDisableDepthTest : 1;
 	uint32 bOutputsVelocityInBasePass : 1;
 	uint32 bUsesGlobalDistanceField : 1;
@@ -608,6 +610,7 @@ public:
 	 * @param ForceDuration							- Number of seconds to keep all mip-levels in memory, disregarding the normal priority logic. Negative value turns it off.
 	 * @param CinematicTextureGroups				- Bitfield indicating texture groups that should use extra high-resolution mips
 	 */
+	UFUNCTION(BlueprintCallable, Category = "Rendering|Material")
 	ENGINE_API virtual void SetForceMipLevelsToBeResident( bool OverrideForceMiplevelsToBeResident, bool bForceMiplevelsToBeResidentValue, float ForceDuration, int32 CinematicTextureGroups = 0 );
 
 	/**

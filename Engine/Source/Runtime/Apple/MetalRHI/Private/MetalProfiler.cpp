@@ -4,6 +4,7 @@
 #include "MetalProfiler.h"
 #include "EngineGlobals.h"
 #include "StaticBoundShaderState.h"
+#include "MetalCommandBuffer.h"
 
 DEFINE_STAT(STAT_MetalMakeDrawableTime);
 DEFINE_STAT(STAT_MetalDrawCallTime);
@@ -209,9 +210,20 @@ void FMetalEventNode::StartTiming()
 
 MTLCommandBufferHandler FMetalEventNode::Start(void)
 {
-	return Block_copy(^(id<MTLCommandBuffer>)
+	return Block_copy(^(id<MTLCommandBuffer> CompletedBuffer)
 	{
-		StartTime = mach_absolute_time();
+#if !PLATFORM_MAC
+		if (FMetalCommandQueue::SupportsFeature(EMetalFeaturesGPUCommandBufferTimes))
+		{
+			const CFTimeInterval GpuTimeSeconds = ((id<IMetalCommandBufferExtensions>)CompletedBuffer).GPUStartTime;
+			const double CyclesPerSecond = 1.0 / FPlatformTime::GetSecondsPerCycle();
+			StartTime = GpuTimeSeconds * CyclesPerSecond;
+		}
+		else
+#endif
+		{
+			StartTime = mach_absolute_time();
+		}		
 	});
 }
 
@@ -222,13 +234,25 @@ void FMetalEventNode::StopTiming()
 
 MTLCommandBufferHandler FMetalEventNode::Stop(void)
 {
-	return Block_copy(^(id<MTLCommandBuffer>)
+	return Block_copy(^(id<MTLCommandBuffer> CompletedBuffer)
 	{
-		EndTime = mach_absolute_time();
+#if !PLATFORM_MAC
+		if (FMetalCommandQueue::SupportsFeature(EMetalFeaturesGPUCommandBufferTimes))
+		{
+			const CFTimeInterval GpuTimeSeconds = ((id<IMetalCommandBufferExtensions>)CompletedBuffer).GPUEndTime;
+			const double CyclesPerSecond = 1.0 / FPlatformTime::GetSecondsPerCycle();
+			EndTime = GpuTimeSeconds * CyclesPerSecond;
+		}
+		else
+#endif
+		{
+			EndTime = mach_absolute_time();
+		}
 	 
 		if(bRoot)
 		{
-			GGPUFrameTime = FMath::TruncToInt( double(GetTiming()) / double(FPlatformTime::GetSecondsPerCycle()) );
+			uint32 Time = FMath::TruncToInt( double(GetTiming()) / double(FPlatformTime::GetSecondsPerCycle()) );
+			FPlatformAtomics::InterlockedExchange((int32*)&GGPUFrameTime, (int32)Time);
 			if(!bFullProfiling)
 			{
 				delete this;

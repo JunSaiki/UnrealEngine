@@ -84,6 +84,11 @@
 
 #endif   
 
+#if COMPILER_HLSLCC
+    #define ddx_fine(x) ddx(x)
+    #define ddy_fine(y) ddy(y)
+#endif
+
 #if POST_PROCESS_ALPHA
 #define SceneColorLayout float4
 #define CastFloat4ToSceneColorLayout(x) (x)
@@ -182,7 +187,7 @@
 	#define FCOLOR_COMPONENT_SWIZZLE .bgra
 	#define STENCIL_COMPONENT_SWIZZLE .x
 #elif METAL_MRT_PROFILE
-	#define FEATURE_LEVEL FEATURE_LEVEL_SM4
+	#define FEATURE_LEVEL FEATURE_LEVEL_SM5
 	#define FCOLOR_COMPONENT_SWIZZLE .bgra
 	#define STENCIL_COMPONENT_SWIZZLE .x
 #elif METAL_SM4_PROFILE
@@ -1837,7 +1842,7 @@ float DecodePackedHeight(float2 PackedHeight)
 
 uint ReverseBits32( uint bits )
 {
-#if SM5_PROFILE && !METAL_SM5_PROFILE
+#if SM5_PROFILE && !(METAL_SM5_PROFILE || METAL_MRT_PROFILE)
 	return reversebits( bits );
 #else
 	bits = ( bits << 16) | ( bits >> 16);

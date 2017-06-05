@@ -210,7 +210,7 @@ public:
 	void ResetToRefPose(const FBoneContainer& RequiredBones)
 	{
 		const TArray<FTransform>& RefPoseCompactArray = RequiredBones.GetRefPoseCompactArray();
-		this->Bones.Reset();
+		this->Bones.Reset(RefPoseCompactArray.Num());
 		this->Bones.Append(RefPoseCompactArray);
 
 		// If retargeting is disabled, copy ref pose from Skeleton, rather than mesh.

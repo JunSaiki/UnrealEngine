@@ -1175,11 +1175,12 @@ enum ir_expression_operation
 	ir_ternop_lerp,
 	ir_ternop_smoothstep,
 	ir_ternop_clamp,
+	ir_ternop_fma,
 
 	/**
 	* A sentinel marking the last of the ternary operations.
 	*/
-	ir_last_ternop = ir_ternop_clamp,
+	ir_last_ternop = ir_ternop_fma,
 
 	ir_quadop_vector,
 

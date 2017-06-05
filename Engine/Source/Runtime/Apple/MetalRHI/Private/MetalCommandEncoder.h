@@ -301,7 +301,7 @@ public:
 	 * Get the internal ring-buffer used for temporary allocations.
 	 * @returns The temporary allocation buffer for this command-encoder.
 	 */
-	TSharedRef<FRingBuffer, ESPMode::ThreadSafe> GetRingBuffer(void) const;
+	FRingBuffer& GetRingBuffer(void);
 	
 private:
 #pragma mark - Private Functions -
@@ -345,7 +345,7 @@ private:
 	MTLStoreAction DepthStoreAction;
 	MTLStoreAction StencilStoreAction;
 	
-	TSharedPtr<FRingBuffer, ESPMode::ThreadSafe> RingBuffer;
+	FRingBuffer RingBuffer;
 	
 	MTLRenderPassDescriptor* RenderPassDesc;
 	NSUInteger RenderPassDescApplied;

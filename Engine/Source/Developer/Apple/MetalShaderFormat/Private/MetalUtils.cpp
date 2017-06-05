@@ -1071,15 +1071,36 @@ void FMetalCodeBackend::MovePackedUniformsToMain(exec_list* ir, _mesa_glsl_parse
 		auto* Var = Instruction->as_variable();
 		if (Var)
 		{
-			check(Var->mode == ir_var_uniform || Var->mode == ir_var_out || Var->mode == ir_var_in || Var->mode == ir_var_shared);
-			if ((!Var->type->is_sampler() && !Var->type->is_image()) || Var->type->sampler_buffer)
-            {
-                OutBuffers.Buffers.Add(Var);
-            }
-            else
-            {
-                OutBuffers.Textures.Add(Var);
-            }
+			bool bIsBuffer = false;
+			switch(TypedMode)
+			{
+				case EMetalTypeBufferModeNone:
+				{
+					bIsBuffer = (!Var->type->is_sampler() && !Var->type->is_image()) || Var->type->sampler_buffer;
+					break;
+				}
+				case EMetalTypeBufferModeSRV:
+				{
+					bIsBuffer = (!Var->type->is_sampler() && !Var->type->is_image()) || (Var->type->sampler_buffer && (Var->type->is_image() || Var->type->inner_type->is_record() || OutBuffers.AtomicVariables.find(Var) != OutBuffers.AtomicVariables.end()));
+					break;
+				}
+				case EMetalTypeBufferModeUAV:
+				{
+					bIsBuffer = (!Var->type->is_sampler() && !Var->type->is_image()) || (Var->type->sampler_buffer && (OutBuffers.AtomicVariables.find(Var) != OutBuffers.AtomicVariables.end() || Var->type->inner_type->is_record()));
+					break;
+				}
+				default:
+					check(false);
+					break;
+			}
+			if (bIsBuffer)
+			{
+				OutBuffers.AddBuffer(Var);
+			}
+			else
+			{
+				OutBuffers.AddTexture(Var);
+			}
 		}
 	}
     

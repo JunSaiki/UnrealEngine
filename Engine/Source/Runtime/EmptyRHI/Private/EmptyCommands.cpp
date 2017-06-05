@@ -6,7 +6,7 @@
 
 #include "EmptyRHIPrivate.h"
 
-void FEmptyDynamicRHI::RHISetStreamSource(uint32 StreamIndex,FVertexBufferRHIParamRef VertexBufferRHI,uint32 Stride,uint32 Offset)
+void FEmptyDynamicRHI::RHISetStreamSource(uint32 StreamIndex,FVertexBufferRHIParamRef VertexBufferRHI, uint32 Offset)
 {
 	FEmptyVertexBuffer* VertexBuffer = ResourceCast(VertexBufferRHI);
 

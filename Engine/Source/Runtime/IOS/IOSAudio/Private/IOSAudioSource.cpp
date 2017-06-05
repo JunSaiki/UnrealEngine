@@ -180,6 +180,11 @@ bool FIOSAudioSoundSource::Init(FWaveInstance* InWaveInstance)
 		UE_CLOG(Status != noErr, LogIOSAudio, Error, TEXT("Failed to set k3DMixerParam_Azimuth for audio mixer unit: BusNumber=%d, Channel=%d"), BusNumber, Channel);
 	}
 
+	if (WaveInstance->StartTime)
+	{
+		IOSBuffer->DecompressionState->SeekToTime(WaveInstance->StartTime);
+	}
+
 	// Start in a disabled state
 	DetachFromAUGraph();
 	Update();

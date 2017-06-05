@@ -312,7 +312,7 @@ void FDetailedTickStats::DumpStats()
 		Totals.Count		= 0;
 
 		// Dump tick stats sorted by total time.
-		UE_LOG(LogLevel, Log, TEXT("Per object stats, frame # %i"), GFrameCounter);
+		UE_LOG(LogLevel, Log, TEXT("Per object stats, frame # %llu"), (uint64)GFrameCounter);
 		for( int32 i=0; i<SortedTickStats.Num(); i++ )
 		{
 			const FTickStats& TickStats = SortedTickStats[i];

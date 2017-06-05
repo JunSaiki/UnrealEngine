@@ -288,6 +288,14 @@ void FOpenGLDynamicRHI::RHISetStreamSource(uint32 StreamIndex,FVertexBufferRHIPa
 	PendingState.Streams[StreamIndex].Offset = Offset;
 }
 
+void FOpenGLDynamicRHI::RHISetStreamSource(uint32 StreamIndex, FVertexBufferRHIParamRef VertexBufferRHI, uint32 Offset)
+{
+	FOpenGLVertexBuffer* VertexBuffer = ResourceCast(VertexBufferRHI);
+	PendingState.Streams[StreamIndex].VertexBuffer = VertexBuffer;
+	PendingState.Streams[StreamIndex].Offset = Offset;
+	ensure(0);
+}
+
 void FOpenGLDynamicRHI::RHISetStreamOutTargets(uint32 NumTargets, const FVertexBufferRHIParamRef* VertexBuffers, const uint32* Offsets)
 {
 	check(0);
@@ -2701,7 +2709,7 @@ void FOpenGLDynamicRHI::RHIDrawPrimitive(uint32 PrimitiveType,uint32 BaseVertexI
 		REPORT_GL_DRAW_ARRAYS_INSTANCED_EVENT_FOR_FRAME_DUMP( DrawMode, 0, NumElements, NumInstances );
 	}
 
-	FShaderCache::LogDraw(FShaderCache::GetDefaultCacheState(), 0);
+	FShaderCache::LogDraw(FShaderCache::GetDefaultCacheState(), PrimitiveType, 0);
 }
 
 void FOpenGLDynamicRHI::RHIDrawPrimitiveIndirect(uint32 PrimitiveType,FVertexBufferRHIParamRef ArgumentBufferRHI,uint32 ArgumentOffset)
@@ -2748,7 +2756,7 @@ void FOpenGLDynamicRHI::RHIDrawPrimitiveIndirect(uint32 PrimitiveType,FVertexBuf
 		}
 		glBindBuffer( GL_DRAW_INDIRECT_BUFFER, 0);
 		
-		FShaderCache::LogDraw(FShaderCache::GetDefaultCacheState(), 0);
+		FShaderCache::LogDraw(FShaderCache::GetDefaultCacheState(), PrimitiveType, 0);
 	}
 	else
 	{
@@ -2810,7 +2818,7 @@ void FOpenGLDynamicRHI::RHIDrawIndexedIndirect(FIndexBufferRHIParamRef IndexBuff
 		}
 		glBindBuffer( GL_DRAW_INDIRECT_BUFFER, 0);
 		
-		FShaderCache::LogDraw(FShaderCache::GetDefaultCacheState(), IndexBuffer->GetStride());
+		FShaderCache::LogDraw(FShaderCache::GetDefaultCacheState(), PrimitiveType, IndexBuffer->GetStride());
 	}
 	else
 	{
@@ -2917,7 +2925,7 @@ void FOpenGLDynamicRHI::RHIDrawIndexedPrimitive(FIndexBufferRHIParamRef IndexBuf
 	}
 #endif
 
-	FShaderCache::LogDraw(FShaderCache::GetDefaultCacheState(), IndexBuffer->GetStride());
+	FShaderCache::LogDraw(FShaderCache::GetDefaultCacheState(), PrimitiveType, IndexBuffer->GetStride());
 }
 
 void FOpenGLDynamicRHI::RHIDrawIndexedPrimitiveIndirect(uint32 PrimitiveType,FIndexBufferRHIParamRef IndexBufferRHI,FVertexBufferRHIParamRef ArgumentBufferRHI,uint32 ArgumentOffset)
@@ -2970,7 +2978,7 @@ void FOpenGLDynamicRHI::RHIDrawIndexedPrimitiveIndirect(uint32 PrimitiveType,FIn
 		}
 		glBindBuffer( GL_DRAW_INDIRECT_BUFFER, 0);
 		
-		FShaderCache::LogDraw(FShaderCache::GetDefaultCacheState(), IndexBuffer->GetStride());
+		FShaderCache::LogDraw(FShaderCache::GetDefaultCacheState(), PrimitiveType, IndexBuffer->GetStride());
 	}
 	else
 	{
@@ -3091,7 +3099,7 @@ void FOpenGLDynamicRHI::RHIEndDrawPrimitiveUP()
 
 	REPORT_GL_DRAW_ARRAYS_EVENT_FOR_FRAME_DUMP( DrawMode, 0, NumElements );
 
-	FShaderCache::LogDraw(FShaderCache::GetDefaultCacheState(), 0);
+	FShaderCache::LogDraw(FShaderCache::GetDefaultCacheState(), PendingState.PrimitiveType, 0);
 }
 
 /**
@@ -3241,7 +3249,7 @@ void FOpenGLDynamicRHI::RHIEndDrawIndexedPrimitiveUP()
 
 	REPORT_GL_DRAW_RANGE_ELEMENTS_EVENT_FOR_FRAME_DUMP( DrawMode, PendingState.MinVertexIndex, PendingState.MinVertexIndex + PendingState.NumVertices, NumElements, IndexType, 0 );
 
-	FShaderCache::LogDraw(FShaderCache::GetDefaultCacheState(), PendingState.IndexDataStride);
+	FShaderCache::LogDraw(FShaderCache::GetDefaultCacheState(), PendingState.PrimitiveType, PendingState.IndexDataStride);
 }
 
 

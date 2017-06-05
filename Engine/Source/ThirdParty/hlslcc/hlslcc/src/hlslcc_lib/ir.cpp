@@ -650,6 +650,7 @@ static const char *const operator_strs[ir_opcode_count] =
 	"lerp",
 	"smoothstep",
 	"clamp",
+	"fma",
 
 	"vector",
 };

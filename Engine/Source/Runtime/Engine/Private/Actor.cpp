@@ -2466,7 +2466,10 @@ void AActor::AddOwnedComponent(UActorComponent* Component)
 {
 	check(Component->GetOwner() == this);
 
-	Modify();
+	// Note: we do not mark dirty here because this can be called when in editor when modifying transient components
+	// if a component is added during this time it should not dirty.  Higher level code in the editor should always dirty the package anyway
+	const bool bMarkDirty = false;
+	Modify(bMarkDirty);
 
 	bool bAlreadyInSet = false;
 	OwnedComponents.Add(Component, &bAlreadyInSet);
@@ -2491,7 +2494,10 @@ void AActor::AddOwnedComponent(UActorComponent* Component)
 
 void AActor::RemoveOwnedComponent(UActorComponent* Component)
 {
-	Modify();
+	// Note: we do not mark dirty here because this can be called when in editor when modifying transient components
+	// if a component is added during this time it should not dirty.  Higher level code in the editor should always dirty the package anyway
+	const bool bMarkDirty = false;
+	Modify(bMarkDirty);
 
 	if (OwnedComponents.Remove(Component) > 0)
 	{
